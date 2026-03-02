@@ -18,7 +18,7 @@ GITHUB_REPO = os.environ.get('GITHUB_REPOSITORY', '')
 GITHUB_RUN_ID = os.environ.get('GITHUB_RUN_ID', '')
 GITHUB_SERVER = os.environ.get('GITHUB_SERVER_URL', 'https://github.com')
 
-# 스크린샷 캡처용 (검색결과 - 시각적 요약)
+# 스크린샷 캡처용 (검색결과 페이지)
 SCREENSHOT_SITES = [
     {
         'name': '네이버',
@@ -32,19 +32,7 @@ SCREENSHOT_SITES = [
     },
 ]
 
-# 텍스트 추출용 (금융 페이지 - 정확한 수치)
-TEXT_SOURCES = [
-    {
-        'name': '네이버',
-        'url': 'https://finance.naver.com/marketindex/goldDetail.nhn',
-    },
-    {
-        'name': '다음',
-        'url': 'https://finance.daum.net/domestic/exchange/COMMODITY-GOLD',
-    },
-]
-
-# 가격 유효 범위 (비정상값 필터링)
+# 가격 유효 범위 (비정상값 필터링 - 다음 Selenium 추출용)
 VALID_RANGES = {
     '기준가':   (50_000, 1_500_000),
     '살때':     (50_000, 1_500_000),
@@ -54,6 +42,8 @@ VALID_RANGES = {
     '1돈':      (200_000, 10_000_000),
 }
 
+
+# ── Discord 전송 ───────────────────────────────────────
 
 def send_discord_combined(content, image_paths):
     """Discord Webhook으로 텍스트 + 이미지를 하나의 메시지로 전송"""
@@ -78,6 +68,86 @@ def send_discord_combined(content, image_paths):
             f.close()
 
 
+# ── 네이버 금시세 (HTTP 직접 파싱 - 정확) ─────────────────
+
+def fetch_naver_gold():
+    """네이버 금융 금시세 테이블을 HTTP로 직접 파싱"""
+    url = 'https://finance.naver.com/marketindex/goldDailyQuote.nhn'
+    headers = {
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                      'AppleWebKit/537.36 (KHTML, like Gecko) '
+                      'Chrome/131.0.0.0 Safari/537.36'
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.encoding = 'euc-kr'
+        html = resp.text
+    except Exception as e:
+        print(f"[네이버] HTTP 요청 실패: {e}")
+        return {}
+
+    # 테이블 첫 번째 행 (최신 데이터) 파싱
+    # 컬럼: 날짜, 매매기준가, 전일대비, 살때(일반), 팔때(일반),
+    #        살때(순도), 팔때(순도), 국제금달러, 원달러환율
+    rows = re.findall(r'<tr\s+class="(up|down)">(.*?)</tr>', html, re.DOTALL)
+    if not rows:
+        print("[네이버] 테이블 행을 찾을 수 없음")
+        return {}
+
+    direction, row_html = rows[0]
+    cells = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.DOTALL)
+    cells = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
+    cells = [re.sub(r'\s+', ' ', c).strip() for c in cells]
+
+    if len(cells) < 9:
+        print(f"[네이버] 컬럼 수 부족: {len(cells)}")
+        return {}
+
+    arrow = '▲' if direction == 'up' else '▼'
+    date_str = cells[0]       # 2026.02.27
+    base_price = cells[1]     # 243,183.15
+    change = cells[2]         # 4,336.83
+    buy_price = cells[3]      # 255,342.30
+    sell_price = cells[4]     # 231,024.00
+    intl_gold = cells[7]      # 5,230.67
+    exchange_rate = cells[8]  # 1,446.20
+
+    # 1돈 계산 (매매기준가 × 3.75)
+    try:
+        don_price = float(base_price.replace(',', '')) * 3.75
+        don_str = f'{don_price:,.0f}'
+    except ValueError:
+        don_str = None
+
+    # 변동률 계산
+    try:
+        base_val = float(base_price.replace(',', ''))
+        change_val = float(change.replace(',', ''))
+        prev_val = base_val - change_val if direction == 'up' else base_val + change_val
+        pct = abs(change_val / prev_val * 100) if prev_val else 0
+        pct_str = f' ({pct:.2f}%)'
+    except ValueError:
+        pct_str = ''
+
+    data = {
+        '날짜':     date_str,
+        '기준가':   f'{base_price} 원/g',
+        '전일대비': f'{arrow} {change} 원{pct_str}',
+        '살 때':    f'{buy_price} 원/g',
+        '팔 때':    f'{sell_price} 원/g',
+        '국제금':   f'{intl_gold} 달러/온스',
+        '환율':     f'{exchange_rate} 원/$',
+    }
+    if don_str:
+        data['1돈'] = f'{don_str} 원/돈'
+
+    print(f"[네이버] 파싱 완료: {date_str}")
+    return data
+
+
+# ── 다음 금시세 (Selenium 추출) ────────────────────────
+
 def find_price(text, min_val, max_val):
     """텍스트에서 유효 범위 내의 가격을 찾아 반환"""
     numbers = re.findall(r'\d[\d,]*(?:\.\d+)?', text)
@@ -91,10 +161,11 @@ def find_price(text, min_val, max_val):
     return None
 
 
-def extract_gold_data(driver, source):
-    """금융 페이지에서 금시세 핵심 데이터 추출"""
-    print(f"[텍스트] {source['name']} 접속: {source['url']}")
-    driver.get(source['url'])
+def fetch_daum_gold(driver):
+    """다음 금융 페이지에서 금시세 데이터 추출"""
+    url = 'https://finance.daum.net/domestic/exchange/COMMODITY-GOLD'
+    print(f"[다음] 접속: {url}")
+    driver.get(url)
 
     try:
         WebDriverWait(driver, 15).until(
@@ -102,7 +173,7 @@ def extract_gold_data(driver, source):
         )
         time.sleep(5)
     except Exception as e:
-        print(f"  페이지 로딩 실패: {e}")
+        print(f"[다음] 페이지 로딩 실패: {e}")
         return {}
 
     body_text = driver.find_element(By.TAG_NAME, "body").text
@@ -116,25 +187,21 @@ def extract_gold_data(driver, source):
         next_line = lines[i + 1] if i + 1 < len(lines) else ''
         combined = line + ' ' + next_line
 
-        # 매매기준가
         if ('매매' in line and '기준' in line) and '기준가' not in data:
             n = find_price(combined, *rng['기준가'])
             if n:
                 data['기준가'] = f'{n} 원/g'
 
-        # 살 때
         if ('살 때' in line or '살때' in line) and '살 때' not in data:
             n = find_price(combined, *rng['살때'])
             if n:
                 data['살 때'] = f'{n} 원/g'
 
-        # 팔 때
         if ('팔 때' in line or '팔때' in line) and '팔 때' not in data:
             n = find_price(combined, *rng['팔때'])
             if n:
                 data['팔 때'] = f'{n} 원/g'
 
-        # 전일대비
         if ('전일대비' in line or '전일 대비' in line) and '전일대비' not in data:
             direction = ''
             if '상승' in combined or '▲' in combined:
@@ -147,28 +214,29 @@ def extract_gold_data(driver, source):
                 pct_str = f' ({pct.group(1)}%)' if pct else ''
                 data['전일대비'] = f'{direction}{n} 원{pct_str}'
 
-        # 국제금 / 달러시세
-        if ('국제금' in line or '달러' in line or '$/온스' in line
-                or '달러/온스' in line) and '국제금' not in data:
+        if ('국제금' in line or '달러' in line or '달러/온스' in line
+                or '$/온스' in line) and '국제금' not in data:
             n = find_price(combined, *rng['국제금'])
             if n:
                 data['국제금'] = f'{n} 달러/온스'
 
-        # 1돈 가격
         if ('1돈' in line or '한돈' in line) and '1돈' not in data:
             n = find_price(combined, *rng['1돈'])
             if n:
                 data['1돈'] = f'{n} 원/돈'
 
-    # 변동률 보완 (전일대비 못 찾은 경우)
+    # 변동률 보완
     if '전일대비' not in data:
         pct = re.search(r'([+-]?\d+\.\d+)\s*%', body_text)
         if pct:
             sign = '▲' if not pct.group(1).startswith('-') else '▼'
             data['전일대비'] = f'{sign} {pct.group(1)}%'
 
+    print(f"[다음] 추출 항목: {len(data)}개")
     return data
 
+
+# ── 포맷 ──────────────────────────────────────────────
 
 def format_section(name, data):
     """한 소스의 데이터를 포맷"""
@@ -182,9 +250,12 @@ def format_section(name, data):
         ('팔 때',    '팔 때    '),
         ('1돈',      '1돈(3.75g)'),
         ('국제금',   '국제금    '),
+        ('환율',     '환율      '),
     ]
 
-    lines = [f'[ {name} ]']
+    date_str = data.get('날짜', '')
+    header = f'[ {name} ] {date_str}' if date_str else f'[ {name} ]'
+    lines = [header]
     for key, label in order:
         if key in data:
             lines.append(f'  {label} {data[key]}')
@@ -213,30 +284,32 @@ def main():
     KST = timezone(timedelta(hours=9))
     now = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     github_info = build_github_info()
+
+    # 1) 네이버 금시세 (HTTP 직접 파싱 - Selenium 불필요)
+    naver_data = fetch_naver_gold()
+    naver_section = format_section('네이버', naver_data)
+    print(f"\n{naver_section}")
+
+    # 2) Selenium: 스크린샷 캡처 + 다음 텍스트 추출
     driver = create_driver()
     wait = WebDriverWait(driver, 15)
-
     image_files = []
-    sections = []
 
     try:
-        # 1) 스크린샷 캡처 (검색결과 페이지)
+        # 스크린샷 캡처
         for site in SCREENSHOT_SITES:
-            print(f"\n{'='*40}")
-            print(f"[캡처] {site['name']} 접속: {site['url']}")
+            print(f"\n[캡처] {site['name']} 접속: {site['url']}")
             driver.get(site['url'])
             wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
             time.sleep(5)
             driver.save_screenshot(site['file'])
             image_files.append(site['file'])
-            print(f"[캡처] {site['name']} 완료: {site['file']}")
+            print(f"[캡처] {site['name']} 완료")
 
-        # 2) 텍스트 추출 (금융 페이지 - 네이버, 다음 각각)
-        for source in TEXT_SOURCES:
-            data = extract_gold_data(driver, source)
-            section = format_section(source['name'], data)
-            sections.append(section)
-            print(f"\n{section}")
+        # 다음 금시세 텍스트 추출
+        daum_data = fetch_daum_gold(driver)
+        daum_section = format_section('다음', daum_data)
+        print(f"\n{daum_section}")
 
     except Exception as e:
         print(f"오류: {e}")
@@ -247,7 +320,7 @@ def main():
         driver.quit()
 
     # 3) Discord 전송 (텍스트 + 이미지 하나의 메시지)
-    body = '\n\n'.join(sections)
+    body = f'{naver_section}\n\n{daum_section}'
     msg = f"**금시세 ({now})**\n```\n{body}{github_info}\n```"
     send_discord_combined(msg, image_files)
 
