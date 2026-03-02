@@ -67,8 +67,8 @@ def extract_gold_summary(driver, site_name):
         print(f"텍스트 추출 오류: {e}")
         return None
 
-    # 가격 패턴: 숫자+콤마+소수점 (예: 242,096.67)
-    price_re = re.compile(r'[\d,]+(?:\.\d+)?')
+    # 가격 패턴: 반드시 숫자 포함 (예: 242,096.67)
+    price_re = re.compile(r'\d[\d,]*(?:\.\d+)?')
 
     result = {}
 
@@ -117,23 +117,20 @@ def extract_gold_summary(driver, site_name):
         # 국제금 (달러)
         if '국제금' in line or '달러' in line or '$/온스' in line:
             prices = price_re.findall(line)
-            if prices:
-                # 달러 가격은 보통 1,000 이상의 값
-                for p in prices:
-                    val = float(p.replace(',', ''))
-                    if val > 500:
-                        result['국제금'] = p + '$/oz'
-                        break
+            for p in prices:
+                stripped = p.replace(',', '')
+                if stripped and float(stripped) > 500:
+                    result['국제금'] = p + '$/oz'
+                    break
 
         # 1돈 가격
         if '1돈' in line or '한돈' in line or '3.75g' in line:
             prices = price_re.findall(line)
-            if prices:
-                for p in prices:
-                    val = float(p.replace(',', ''))
-                    if val > 100000:
-                        result['1돈(3.75g)'] = p + '원'
-                        break
+            for p in prices:
+                stripped = p.replace(',', '')
+                if stripped and float(stripped) > 100000:
+                    result['1돈(3.75g)'] = p + '원'
+                    break
 
     # 변동률 추출 (별도)
     pct_match = re.search(r'([+-]?\d+\.\d+)\s*%', body_text)
