@@ -196,7 +196,8 @@ def build_github_info():
     if not GITHUB_REPO:
         return ""
     run_url = f"{GITHUB_SERVER}/{GITHUB_REPO}/actions/runs/{GITHUB_RUN_ID}"
-    return f"\n─────────────────────\n{run_url}"
+    short_url = re.sub(r'^https?://', '', run_url)
+    return f"\n─────────────────────\n{short_url}"
 
 
 def create_driver():
@@ -246,7 +247,7 @@ def main():
 
     # 3) Discord 전송 (텍스트 + 이미지 하나의 메시지)
     body = '\n\n'.join(sections)
-    msg = f"**금시세 ({now})**\n```\n{body}\n```{github_info}"
+    msg = f"**금시세 ({now})**\n```\n{body}{github_info}\n```"
     send_discord_combined(msg, image_files)
 
     print("\n모든 전송 완료")
