@@ -9,7 +9,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # 1. Discord Webhook 설정 (GitHub Secrets)
-DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
+DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_GOLD_PRICE_WEBHOOK_URL')
 
 # GitHub Actions 환경 정보
 GITHUB_REPO = os.environ.get('GITHUB_REPOSITORY', '')

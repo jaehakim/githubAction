@@ -29,5 +29,5 @@ jobs:
 
       - name: Run Gold Price Script
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_GOLD_PRICE_WEBHOOK_URL: ${{ secrets.DISCORD_GOLD_PRICE_WEBHOOK_URL }}
         run: python gold_price.py
