@@ -33,14 +33,15 @@ driver = webdriver.Chrome(options=options)
 wait = WebDriverWait(driver, 15)
 
 try:
-    # 3. 한국금거래소 접속
-    print("1. 한국금거래소 접속 중...")
-    driver.get("https://www.koreagoldx.co.kr/main/main.do")
+    # 3. 국제표준금거래소 접속
+    print("1. 국제표준금거래소 접속 중...")
+    driver.get("https://www.goodgold.co.kr/")
 
-    # 4. 페이지 로딩 대기
+    # 4. 페이지 로딩 대기 (시세 데이터 렌더링까지)
     print("2. 페이지 로딩 대기...")
     wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-    driver.implicitly_wait(3)
+    import time
+    time.sleep(5)  # JS 렌더링 + 시세 데이터 로딩 대기
 
     # 5. 스크린샷 캡처
     print("3. 화면 캡처")
@@ -51,7 +52,7 @@ try:
     # 6. 텔레그램 전송
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     print("4. 텔레그램 전송")
-    send_telegram_photo(screenshot_path, f'📊 금시세 ({now})\n출처: 한국금거래소')
+    send_telegram_photo(screenshot_path, f'📊 금시세 ({now})\n출처: 국제표준금거래소 goodgold.co.kr')
     print("✅ 전송 완료")
 
 except Exception as e:
