@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import time
@@ -16,9 +17,8 @@ DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_GOLD_PRICE_WEBHOOK_URL')
 GITHUB_REPO = os.environ.get('GITHUB_REPOSITORY', '')
 GITHUB_RUN_ID = os.environ.get('GITHUB_RUN_ID', '')
 GITHUB_SERVER = os.environ.get('GITHUB_SERVER_URL', 'https://github.com')
-GITHUB_ACTOR = os.environ.get('GITHUB_ACTOR', '')
 
-# 캡처 대상 사이트
+# 캡처 대상 (스크린샷용 - 검색결과 페이지)
 SITES = [
     {
         'name': '네이버',
@@ -32,139 +32,155 @@ SITES = [
     },
 ]
 
+# 텍스트 추출용 (구조화된 금융 페이지)
+DAUM_GOLD_PAGE = 'https://finance.daum.net/domestic/exchange/COMMODITY-GOLD'
 
-def send_discord_message(content):
-    """Discord 텍스트 메시지 전송"""
-    data = {'content': content}
-    response = requests.post(DISCORD_WEBHOOK_URL, json=data)
-    if response.status_code in (200, 204):
-        print("Discord 텍스트 전송 성공")
-    else:
-        print("Discord 텍스트 전송 실패:", response.status_code, response.text)
-
-
-def send_discord_file(file_path, message=""):
-    """Discord 파일(이미지) 전송"""
-    data = {}
-    if message:
-        data['content'] = message
-    with open(file_path, 'rb') as f:
-        files = {'file': (os.path.basename(file_path), f, 'image/png')}
-        response = requests.post(DISCORD_WEBHOOK_URL, data=data, files=files)
-    if response.status_code in (200, 204):
-        print(f"Discord 파일 전송 성공: {file_path}")
-    else:
-        print(f"Discord 파일 전송 실패: {response.status_code} {response.text}")
+# 가격 유효 범위 (비정상값 필터링)
+VALID_RANGES = {
+    '매매기준가': (50_000, 1_500_000),     # 원/g
+    '살 때':     (50_000, 1_500_000),      # 원
+    '팔 때':     (50_000, 1_500_000),      # 원
+    '전일대비':  (10, 100_000),            # 원
+    '국제금':    (500, 20_000),            # $/oz
+    '1돈':       (200_000, 10_000_000),    # 원
+}
 
 
-def extract_gold_summary(driver, site_name):
-    """페이지에서 금시세 핵심 데이터만 추출"""
+def send_discord_combined(content, image_paths):
+    """Discord Webhook으로 텍스트 + 이미지를 하나의 메시지로 전송"""
+    payload = json.dumps({'content': content})
+    files = {'payload_json': (None, payload, 'application/json')}
+
+    open_handles = []
+    for i, path in enumerate(image_paths):
+        if os.path.exists(path):
+            f = open(path, 'rb')
+            open_handles.append(f)
+            files[f'file{i}'] = (os.path.basename(path), f, 'image/png')
+
     try:
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-        lines = body_text.split('\n')
-        lines = [l.strip() for l in lines if l.strip()]
-    except Exception as e:
-        print(f"텍스트 추출 오류: {e}")
-        return None
+        response = requests.post(DISCORD_WEBHOOK_URL, files=files)
+        if response.status_code in (200, 204):
+            print("Discord 전송 성공")
+        else:
+            print(f"Discord 전송 실패: {response.status_code} {response.text}")
+    finally:
+        for f in open_handles:
+            f.close()
 
-    # 가격 패턴: 반드시 숫자 포함 (예: 242,096.67)
-    price_re = re.compile(r'\d[\d,]*(?:\.\d+)?')
+
+def find_price(text, min_val, max_val):
+    """텍스트에서 유효 범위 내의 가격을 찾아 반환"""
+    numbers = re.findall(r'\d[\d,]*(?:\.\d+)?', text)
+    for n in numbers:
+        try:
+            val = float(n.replace(',', ''))
+            if min_val <= val <= max_val:
+                return n, val
+        except ValueError:
+            continue
+    return None, None
+
+
+def extract_from_finance_page(driver):
+    """다음 금융 페이지에서 정확한 금시세 데이터 추출"""
+    print(f"[텍스트 추출] 접속: {DAUM_GOLD_PAGE}")
+    driver.get(DAUM_GOLD_PAGE)
+
+    try:
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+        time.sleep(5)
+    except Exception as e:
+        print(f"페이지 로딩 실패: {e}")
+        return {}
+
+    body_text = driver.find_element(By.TAG_NAME, "body").text
+    lines = body_text.split('\n')
+    lines = [l.strip() for l in lines if l.strip()]
 
     result = {}
+    rng = VALID_RANGES
 
     for i, line in enumerate(lines):
+        # 다음 줄 참조용
+        next_line = lines[i + 1] if i + 1 < len(lines) else ''
+        combined = line + ' ' + next_line
+
         # 매매기준가
-        if '매매' in line and '기준' in line:
-            prices = price_re.findall(line)
-            if prices:
-                result['매매기준가'] = prices[0] + '원/g'
-            elif i + 1 < len(lines):
-                prices = price_re.findall(lines[i + 1])
-                if prices:
-                    result['매매기준가'] = prices[0] + '원/g'
+        if '매매' in line and '기준' in line and '매매기준가' not in result:
+            n, _ = find_price(combined, *rng['매매기준가'])
+            if n:
+                result['매매기준가'] = n + ' 원/g'
 
         # 살 때
-        if '살 때' in line or '살때' in line:
-            prices = price_re.findall(line)
-            if prices:
-                result['살 때'] = prices[0] + '원'
-            elif i + 1 < len(lines):
-                prices = price_re.findall(lines[i + 1])
-                if prices:
-                    result['살 때'] = prices[0] + '원'
+        if ('살 때' in line or '살때' in line) and '살 때' not in result:
+            n, _ = find_price(combined, *rng['살 때'])
+            if n:
+                result['살 때'] = n + ' 원'
 
         # 팔 때
-        if '팔 때' in line or '팔때' in line:
-            prices = price_re.findall(line)
-            if prices:
-                result['팔 때'] = prices[0] + '원'
-            elif i + 1 < len(lines):
-                prices = price_re.findall(lines[i + 1])
-                if prices:
-                    result['팔 때'] = prices[0] + '원'
+        if ('팔 때' in line or '팔때' in line) and '팔 때' not in result:
+            n, _ = find_price(combined, *rng['팔 때'])
+            if n:
+                result['팔 때'] = n + ' 원'
 
         # 전일대비
-        if '전일대비' in line or '전일 대비' in line:
-            prices = price_re.findall(line)
+        if ('전일대비' in line or '전일 대비' in line) and '전일대비' not in result:
             direction = ''
-            if '상승' in line or '+' in line or '▲' in line:
+            if '상승' in combined or '▲' in combined:
                 direction = '▲ '
-            elif '하락' in line or '-' in line or '▼' in line:
+            elif '하락' in combined or '▼' in combined:
                 direction = '▼ '
-            if prices:
-                result['전일대비'] = direction + prices[0] + '원'
+            n, _ = find_price(combined, *rng['전일대비'])
+            if n:
+                # 변동률도 함께 찾기
+                pct = re.search(r'([+-]?\d+\.\d+)\s*%', combined)
+                pct_str = f' ({pct.group(1)}%)' if pct else ''
+                result['전일대비'] = direction + n + '원' + pct_str
 
-        # 국제금 (달러)
-        if '국제금' in line or '달러' in line or '$/온스' in line:
-            prices = price_re.findall(line)
-            for p in prices:
-                stripped = p.replace(',', '')
-                if stripped and float(stripped) > 500:
-                    result['국제금'] = p + '$/oz'
-                    break
+        # 국제금
+        if ('국제금' in line or '달러' in line or '$/온스' in line) and '국제금' not in result:
+            n, _ = find_price(combined, *rng['국제금'])
+            if n:
+                result['국제금'] = n + ' $/oz'
 
         # 1돈 가격
-        if '1돈' in line or '한돈' in line or '3.75g' in line:
-            prices = price_re.findall(line)
-            for p in prices:
-                stripped = p.replace(',', '')
-                if stripped and float(stripped) > 100000:
-                    result['1돈(3.75g)'] = p + '원'
-                    break
+        if ('1돈' in line or '한돈' in line) and '1돈' not in result:
+            n, _ = find_price(combined, *rng['1돈'])
+            if n:
+                result['1돈'] = n + ' 원'
 
-    # 변동률 추출 (별도)
-    pct_match = re.search(r'([+-]?\d+\.\d+)\s*%', body_text)
-    if pct_match and '전일대비' in result:
-        result['전일대비'] += f' ({pct_match.group(1)}%)'
-    elif pct_match:
-        direction = '▲ ' if not pct_match.group(1).startswith('-') else '▼ '
-        result['변동률'] = direction + pct_match.group(1) + '%'
+    # body 전체에서 변동률 보완
+    if '전일대비' not in result:
+        pct = re.search(r'([+-]?\d+\.\d+)\s*%', body_text)
+        if pct:
+            direction = '▲' if not pct.group(1).startswith('-') else '▼'
+            result['변동률'] = f'{direction} {pct.group(1)}%'
 
     return result
 
 
-def format_summary(site_name, data):
+def format_summary(data):
     """추출된 데이터를 깔끔한 텍스트로 포맷"""
     if not data:
-        return f"**{site_name}** : 추출 실패 (캡처 이미지 확인)"
+        return '(시세 데이터 추출 실패 - 캡처 이미지 확인)'
 
-    lines = [f"**[ {site_name} ]**"]
+    order = [
+        ('매매기준가', '기준가'),
+        ('전일대비',   '전일대비'),
+        ('변동률',     '변동률'),
+        ('살 때',      '살 때'),
+        ('팔 때',      '팔 때'),
+        ('1돈',        '1돈(3.75g)'),
+        ('국제금',     '국제금'),
+    ]
 
-    # 출력 순서 지정
-    order = ['매매기준가', '전일대비', '변동률', '살 때', '팔 때', '1돈(3.75g)', '국제금']
-    labels = {
-        '매매기준가': '기준가',
-        '전일대비': '전일대비',
-        '변동률': '변동률',
-        '살 때': '살 때',
-        '팔 때': '팔 때',
-        '1돈(3.75g)': '1돈(3.75g)',
-        '국제금': '국제금',
-    }
-
-    for key in order:
+    lines = []
+    for key, label in order:
         if key in data:
-            lines.append(f"  {labels[key]:　<8} {data[key]}")
+            lines.append(f'{label:　<8}{data[key]}')
 
     return '\n'.join(lines)
 
@@ -174,7 +190,7 @@ def build_github_info():
     if not GITHUB_REPO:
         return ""
     run_url = f"{GITHUB_SERVER}/{GITHUB_REPO}/actions/runs/{GITHUB_RUN_ID}"
-    return f"\n─────────────────────\n▶ {run_url}"
+    return f"\n─────────────────────\n{run_url}"
 
 
 def create_driver():
@@ -194,52 +210,36 @@ def main():
     driver = create_driver()
     wait = WebDriverWait(driver, 15)
 
-    results = []
+    image_files = []
 
     try:
+        # 1) 스크린샷 캡처 (네이버, 다음 검색결과)
         for site in SITES:
             print(f"\n{'='*40}")
             print(f"[{site['name']}] 접속: {site['url']}")
             driver.get(site['url'])
             wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            time.sleep(5)  # JS 렌더링 대기
-
-            # 핵심 데이터 추출
-            data = extract_gold_summary(driver, site['name'])
-            summary = format_summary(site['name'], data)
-            print(summary)
-
-            # 스크린샷 캡처
+            time.sleep(5)
             driver.save_screenshot(site['file'])
+            image_files.append(site['file'])
             print(f"[{site['name']}] 캡처 완료: {site['file']}")
 
-            results.append({
-                'name': site['name'],
-                'file': site['file'],
-                'summary': summary,
-            })
+        # 2) 텍스트 데이터 추출 (다음 금융 페이지 - 정확한 구조화 데이터)
+        data = extract_from_finance_page(driver)
+        summary = format_summary(data)
+        print(f"\n추출 결과:\n{summary}")
 
     except Exception as e:
         print(f"오류: {e}")
         driver.save_screenshot("error.png")
-        send_discord_message(f"금시세 캡처 오류\n```{e}```{github_info}")
+        send_discord_combined(f"금시세 캡처 오류\n```{e}```{github_info}", ["error.png"])
         return
     finally:
         driver.quit()
 
-    # Discord 전송
-    # 1) 핵심 시세 텍스트
-    msg_parts = [f"**금시세 ({now})**\n"]
-    for r in results:
-        msg_parts.append(r['summary'])
-    msg_parts.append(github_info)
-    send_discord_message('\n'.join(msg_parts))
-
-    # 2) 캡처 이미지
-    time.sleep(1)
-    for r in results:
-        send_discord_file(r['file'])
-        time.sleep(1)
+    # 3) Discord 전송 (텍스트 + 이미지 하나의 메시지)
+    msg = f"**금시세 ({now})**\n```\n{summary}\n```{github_info}"
+    send_discord_combined(msg, image_files)
 
     print("\n모든 전송 완료")
 
