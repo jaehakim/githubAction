@@ -3,7 +3,7 @@ import os
 import re
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -210,7 +210,8 @@ def create_driver():
 
 
 def main():
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    KST = timezone(timedelta(hours=9))
+    now = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     github_info = build_github_info()
     driver = create_driver()
     wait = WebDriverWait(driver, 15)
