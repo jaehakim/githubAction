@@ -3,9 +3,9 @@ name: Gold Price Capture to Discord
 on:
   schedule:
     - cron: '0 0 * * *'   # 09:00 KST
+    - cron: '0 3 * * *'   # 12:00 KST
     - cron: '0 6 * * *'   # 15:00 KST
-    - cron: '0 12 * * *'  # 21:00 KST
-    - cron: '0 18 * * *'  # 03:00 KST
+    - cron: '0 9 * * *'   # 18:00 KST
   workflow_dispatch:       # 수동 실행 버튼
 
 jobs:
